@@ -9,7 +9,8 @@
 
 ;; This package adds Dired file clipboard commands:
 ;;
-;; - M-w copies marked files/directories to the clipboard.
+;; - M-w copies marked files/directories to the clipboard, or the file at
+;;   point when no files are marked.
 ;; - C-y pastes files/directories from the clipboard into the current Dired directory.
 ;; - M-w falls back to the default binding while the region is active.
 ;; - M-w/C-y fall back to the default bindings while editing file names in WDired.
@@ -575,14 +576,14 @@ When PREDICATE is non-nil, call the saved predicate instead."
 
 ;;;###autoload
 (defun dired-clipboard-copy ()
-  "Copy marked Dired files/directories to the clipboard."
+  "Copy marked Dired files/directories, or current file, to the clipboard."
   (interactive nil dired-mode)
   (dired-clipboard--ensure-not-wdired)
   (when (dired-clipboard--region-active-p)
     (user-error "Dired file copy is disabled while the region is active"))
   (let ((files (dired-get-marked-files
-                nil 'marked nil nil
-                "No marked files")))
+                nil nil nil nil
+                "No file at point")))
     (dired-clipboard--copy-files files)
     (message "%d item%s copied to clipboard"
              (length files)
