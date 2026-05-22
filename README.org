@@ -1,0 +1,98 @@
+#+title: dired-clipboard
+
+~dired-clipboard~ adds file-oriented copy and paste commands to Dired.
+
+It lets you use familiar clipboard keys in Dired:
+
+- ~M-w~ copies marked files and directories, or the file at point when no
+  files are marked.
+- ~C-y~ pastes files and directories from the clipboard into the current Dired
+  directory.
+- ~M-w~ keeps its normal behavior while the region is active.
+- ~M-w~ and ~C-y~ keep their normal editing behavior in WDired.
+
+The package also tries to interoperate with desktop file managers by using
+native file clipboard formats where practical.
+
+* Requirements
+
+- Emacs 30.1 or later
+- Optional: ~wl-copy~ for better file clipboard interoperability on
+  PGTK/Wayland
+- Optional: PowerShell on Windows for Explorer FileDrop clipboard support
+- Optional: ~osascript~ on macOS for Finder pasteboard support
+
+* Installation
+
+Put ~dired-clipboard.el~ somewhere in your ~load-path~, then enable the minor
+mode in Dired buffers:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/dired-clipboard.el")
+(require 'dired-clipboard)
+
+(add-hook 'dired-mode-hook #'dired-clipboard-mode)
+#+end_src
+
+With ~use-package~:
+
+#+begin_src emacs-lisp
+(use-package dired-clipboard
+  :load-path "/path/to/dired-clipboard.el"
+  :hook (dired-mode . dired-clipboard-mode))
+#+end_src
+
+* Usage
+
+In a Dired buffer:
+
+- Mark one or more files, then press ~M-w~ to copy them.
+- Press ~M-w~ on an unmarked file to copy the file at point.
+- Open another Dired directory and press ~C-y~ to copy the clipboard files
+  there.
+
+When the clipboard contains files copied from a supported desktop file manager,
+~C-y~ can paste those files into the current Dired directory.
+
+* Desktop Clipboard Support
+
+~dired-clipboard~ supports these clipboard formats:
+
+- Plain newline-separated file names for Dired-to-Dired copy and paste
+- ~text/uri-list~
+- ~x-special/gnome-copied-files~
+- Windows Explorer FileDrop, through PowerShell/.NET
+- macOS Finder file URLs, through ~osascript~ and AppleScriptObjC
+
+On PGTK/Wayland, Emacs may not advertise the file clipboard MIME types expected
+by desktop file managers.  When ~wl-copy~ is available,
+~dired-clipboard-copy~ can use it to own the clipboard with file clipboard data.
+
+* Customization
+
+- ~dired-clipboard-recursive-copies~ controls how directory copies are handled.
+- ~dired-clipboard-keep-marker~ controls the marker used for pasted files.
+- ~dired-clipboard-use-wl-copy~ enables or disables ~wl-copy~ integration.
+- ~dired-clipboard-wayland-target~ selects the Wayland file clipboard MIME
+  target.
+- ~dired-clipboard-use-native-file-clipboard~ enables or disables native
+  Windows and macOS file clipboard integration.
+- ~dired-clipboard-powershell-program~ selects the PowerShell executable.
+- ~dired-clipboard-osascript-program~ selects the ~osascript~ executable.
+
+* Limitations
+
+The main target is local files that Emacs can access directly.
+
+TRAMP files and remote desktop file clipboard sharing are not general-purpose
+file transfer mechanisms.  In remote desktop sessions, copied file paths often
+refer to the remote desktop filesystem rather than the filesystem visible to the
+Emacs process.  ~dired-clipboard~ therefore treats remote desktop integration as
+best-effort and does not try to provide transparent remote file transfer.
+
+For predictable behavior, use this package for local Dired buffers and local
+desktop file managers.
+
+* License
+
+GPL-3.0-or-later.  See [[file:LICENSE][LICENSE]].
