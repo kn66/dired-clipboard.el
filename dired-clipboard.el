@@ -64,9 +64,11 @@ Dired-to-Dired paste."
 (defcustom dired-clipboard-wayland-target 'auto
   "File clipboard MIME target used by wl-copy under PGTK/Wayland.
 The value `auto' uses the GNOME/Nautilus format on GNOME-like
-desktops, and `text/uri-list' on KDE/LXQt and unknown desktops."
+desktops, the MATE/Caja format on MATE, and `text/uri-list' on
+KDE/LXQt and unknown desktops."
   :type '(choice (const :tag "Auto-detect desktop" auto)
                  (const :tag "GNOME/Nautilus format" gnome)
+                 (const :tag "MATE/Caja format" mate)
                  (const :tag "text/uri-list" uri-list))
   :group 'dired-clipboard)
 
@@ -74,8 +76,25 @@ desktops, and `text/uri-list' on KDE/LXQt and unknown desktops."
   "Whether to use native file clipboard formats on Windows and macOS.
 On Windows this uses the Explorer FileDrop clipboard format through
 PowerShell/.NET.  On macOS this uses NSPasteboard file URLs through
-osascript and AppleScriptObjC."
+osascript and AppleScriptObjC.
+
+The enabled backend order is controlled by
+`dired-clipboard-file-clipboard-backends'."
   :type 'boolean
+  :group 'dired-clipboard)
+
+(defcustom dired-clipboard-file-clipboard-backends '(windows macos wayland)
+  "OS/environment file clipboard backends tried in order.
+Each symbol names an entry in
+`dired-clipboard-file-clipboard-backend-alist'.  Unknown or
+unavailable backends are skipped.  The generic Emacs selection and
+kill-ring fallback is always used after these backends fail."
+  :type '(repeat
+          (choice
+           (const :tag "Windows Explorer FileDrop" windows)
+           (const :tag "macOS Finder NSPasteboard" macos)
+           (const :tag "Wayland wl-copy" wayland)
+           (symbol :tag "Custom backend")))
   :group 'dired-clipboard)
 
 (defcustom dired-clipboard-powershell-program nil
@@ -96,6 +115,41 @@ powershell, pwsh.exe and pwsh."
 
 (defvar dired-clipboard--wl-copy-process nil
   "Current wl-copy process used to own the Wayland clipboard.")
+
+(defconst dired-clipboard--copied-files-targets
+  '(x-special/gnome-copied-files
+    x-special/mate-copied-files)
+  "File-manager clipboard targets using copy/cut followed by file URIs.")
+
+(defvar dired-clipboard-file-clipboard-backend-alist
+  '((windows
+     :label "Windows Explorer FileDrop"
+     :available dired-clipboard--windows-backend-available-p
+     :copy dired-clipboard--copy-windows-file-clipboard
+     :paste dired-clipboard--windows-files-from-clipboard)
+    (macos
+     :label "macOS Finder NSPasteboard"
+     :available dired-clipboard--macos-backend-available-p
+     :copy dired-clipboard--copy-macos-file-clipboard
+     :paste dired-clipboard--macos-files-from-clipboard)
+    (wayland
+     :label "Wayland wl-copy"
+     :available dired-clipboard--wayland-backend-available-p
+     :copy dired-clipboard--copy-wayland-file-clipboard))
+  "Alist of OS/environment file clipboard backend definitions.
+Each entry is (NAME . PLIST).  PLIST may contain these keys:
+
+:label is a human-readable backend name.
+:available is an optional predicate called with OPERATION and
+  PAYLOAD.  OPERATION is either `copy' or `paste'.  PAYLOAD is the
+  file clipboard payload plist for copy operations and nil for
+  paste operations.
+:copy is a function called with the file clipboard payload plist.
+:paste is a function called with no arguments and returning file
+  names represented by the current OS clipboard.
+
+Users can add entries here and include their names in
+`dired-clipboard-file-clipboard-backends'.")
 
 (defconst dired-clipboard--file-uri-path-chars
   (append url-unreserved-chars '(?/ ?:))
@@ -297,13 +351,13 @@ When PREDICATE is non-nil, call the saved predicate instead."
   (unless dired-clipboard--saved-text-uri-list-converter
     (setq dired-clipboard--saved-text-uri-list-converter
           (cdr (assq 'text/uri-list selection-converter-alist))))
-  (setq selection-converter-alist
-        (assq-delete-all 'x-special/gnome-copied-files
-                         selection-converter-alist))
-  (push '(x-special/gnome-copied-files
-          . (dired-clipboard--clipboard-target-available-p
-             . dired-clipboard--convert-clipboard-target))
-        selection-converter-alist)
+  (dolist (target dired-clipboard--copied-files-targets)
+    (setq selection-converter-alist
+          (assq-delete-all target selection-converter-alist))
+    (push `(,target
+            . (dired-clipboard--clipboard-target-available-p
+               . dired-clipboard--convert-clipboard-target))
+          selection-converter-alist))
   (let ((cell (assq 'text/uri-list selection-converter-alist)))
     (if cell
         (setcdr cell
@@ -321,6 +375,11 @@ When PREDICATE is non-nil, call the saved predicate instead."
        (getenv "WAYLAND_DISPLAY")
        (executable-find "wl-copy")))
 
+(defun dired-clipboard--wayland-backend-available-p (operation _payload)
+  "Return non-nil if the Wayland backend can handle OPERATION."
+  (and (eq operation 'copy)
+       (dired-clipboard--wl-copy-available-p)))
+
 (defun dired-clipboard--desktop-match-p (&rest names)
   "Return non-nil if current desktop name matches any of NAMES."
   (let ((desktop (or (getenv "XDG_CURRENT_DESKTOP")
@@ -335,20 +394,25 @@ When PREDICATE is non-nil, call the saved predicate instead."
   "Return the wl-copy MIME target kind for the current desktop."
   (pcase dired-clipboard-wayland-target
     ('gnome 'gnome)
+    ('mate 'mate)
     ('uri-list 'uri-list)
     (_ (cond
+        ((dired-clipboard--desktop-match-p "MATE")
+         'mate)
         ((dired-clipboard--desktop-match-p "GNOME" "Cinnamon" "XFCE"
-                                           "MATE" "Budgie" "Unity"
-                                           "Pantheon")
+                                           "Budgie" "Unity" "Pantheon")
          'gnome)
         ((dired-clipboard--desktop-match-p "KDE" "Plasma" "LXQt")
          'uri-list)
         (t 'uri-list)))))
 
-(defun dired-clipboard--wayland-mime-and-data (gnome-list uri-list)
-  "Return a cons of MIME type and data for GNOME-LIST and URI-LIST."
+(defun dired-clipboard--wayland-mime-and-data (copied-files-list uri-list)
+  "Return a cons of MIME type and data.
+COPIED-FILES-LIST is the copy/cut plus file URI payload used by
+GNOME/Nautilus-style targets, including Caja's MATE target."
   (pcase (dired-clipboard--wayland-target)
-    ('gnome (cons "x-special/gnome-copied-files" gnome-list))
+    ('gnome (cons "x-special/gnome-copied-files" copied-files-list))
+    ('mate (cons "x-special/mate-copied-files" copied-files-list))
     (_ (cons "text/uri-list" uri-list))))
 
 (defun dired-clipboard--stop-wl-copy ()
@@ -357,12 +421,14 @@ When PREDICATE is non-nil, call the saved predicate instead."
     (delete-process dired-clipboard--wl-copy-process))
   (setq dired-clipboard--wl-copy-process nil))
 
-(defun dired-clipboard--set-wayland-file-clipboard (gnome-list uri-list)
-  "Set Wayland file clipboard data to GNOME-LIST or URI-LIST using wl-copy."
+(defun dired-clipboard--set-wayland-file-clipboard
+    (copied-files-list uri-list)
+  "Set Wayland file clipboard data using wl-copy."
   (when (dired-clipboard--wl-copy-available-p)
     (dired-clipboard--stop-wl-copy)
     (pcase-let* ((`(,mime-type . ,data)
-                  (dired-clipboard--wayland-mime-and-data gnome-list uri-list))
+                  (dired-clipboard--wayland-mime-and-data
+                   copied-files-list uri-list))
                  (process
                   (make-process
                    :name "dired-clipboard-wl-copy"
@@ -373,6 +439,14 @@ When PREDICATE is non-nil, call the saved predicate instead."
       (process-send-string process data)
       (process-send-eof process)
       process)))
+
+(defun dired-clipboard--copy-wayland-file-clipboard (payload)
+  "Copy PAYLOAD to the Wayland file clipboard."
+  (when-let* ((copied-files-list
+               (plist-get payload :copied-files-list))
+              (uri-list (plist-get payload :uri-list)))
+    (dired-clipboard--set-wayland-file-clipboard
+     copied-files-list uri-list)))
 
 (defun dired-clipboard--lines (text)
   "Return non-empty lines from TEXT."
@@ -430,10 +504,12 @@ When PREDICATE is non-nil, call the saved predicate instead."
         (when-let ((file (dired-clipboard--uri-to-file line)))
           (push file files))))))
 
-(defun dired-clipboard--parse-gnome-files (text)
-  "Return local file names from GNOME/Nautilus clipboard TEXT."
+(defun dired-clipboard--parse-copied-files (text)
+  "Return local file names from copy/cut plus file URI clipboard TEXT."
   (let ((lines (dired-clipboard--lines text)))
-    (when (string= (car lines) "x-special/nautilus-clipboard")
+    (when (member (car lines)
+                  '("x-special/nautilus-clipboard"
+                    "x-special/mate-copied-files"))
       (setq lines (cdr lines)))
     (when (member (car lines) '("copy" "cut"))
       (dired-clipboard--parse-uri-list
@@ -466,6 +542,103 @@ When PREDICATE is non-nil, call the saved predicate instead."
         (push file seen)
         (push file existing)))))
 
+(defun dired-clipboard--first-existing-files (&rest candidates)
+  "Return the first non-empty existing file list from CANDIDATES."
+  (catch 'files
+    (dolist (files candidates)
+      (when-let ((existing (dired-clipboard--existing-files files)))
+        (throw 'files existing)))))
+
+(defun dired-clipboard--file-clipboard-payload (files)
+  "Return a file clipboard payload plist for FILES."
+  (let* ((text (mapconcat #'identity files "\n"))
+         (local-files (dired-clipboard--local-files files))
+         (local-uris (dired-clipboard--uris-for-files local-files))
+         (uri-list (when local-uris
+                     (concat (mapconcat #'identity local-uris "\r\n") "\r\n")))
+         (copied-files-list
+          (when local-uris
+            ;; Nautilus rejects empty lines in this MIME payload.
+            (concat "copy\n" (mapconcat #'identity local-uris "\n"))))
+         (selection (copy-sequence text)))
+    (when local-uris
+      (dired-clipboard--install-selection-converters)
+      (add-text-properties
+       0 (length selection)
+       `(text/uri-list ,uri-list
+                       x-special/gnome-copied-files ,copied-files-list
+                       x-special/mate-copied-files ,copied-files-list)
+       selection))
+    (list :files files
+          :text text
+          :local-files local-files
+          :local-uris local-uris
+          :uri-list uri-list
+          :copied-files-list copied-files-list
+          :gnome-list copied-files-list
+          :selection selection)))
+
+(defun dired-clipboard--file-clipboard-backend-definition (name)
+  "Return the file clipboard backend definition for NAME."
+  (assq name dired-clipboard-file-clipboard-backend-alist))
+
+(defun dired-clipboard--file-clipboard-backend-handler (definition operation)
+  "Return DEFINITION's handler for OPERATION."
+  (let ((handler (plist-get (cdr definition)
+                            (pcase operation
+                              ('copy :copy)
+                              ('paste :paste)))))
+    (and (functionp handler) handler)))
+
+(defun dired-clipboard--file-clipboard-backend-available-p
+    (definition operation payload)
+  "Return non-nil if DEFINITION can handle OPERATION with PAYLOAD."
+  (let ((predicate (plist-get (cdr definition) :available)))
+    (if predicate
+        (and (functionp predicate)
+             (funcall predicate operation payload))
+      t)))
+
+(defun dired-clipboard--call-file-clipboard-backend
+    (name operation &optional payload)
+  "Call file clipboard backend NAME for OPERATION with optional PAYLOAD."
+  (when-let* ((definition
+               (dired-clipboard--file-clipboard-backend-definition name))
+              (handler
+               (dired-clipboard--file-clipboard-backend-handler
+                definition operation)))
+    (ignore-errors
+      (when (dired-clipboard--file-clipboard-backend-available-p
+             definition operation payload)
+        (pcase operation
+          ('copy (funcall handler payload))
+          ('paste (funcall handler)))))))
+
+(defun dired-clipboard--copy-with-file-backends (payload)
+  "Copy PAYLOAD through the first successful file clipboard backend.
+Return the backend name that claimed the clipboard."
+  (catch 'backend
+    (dolist (name dired-clipboard-file-clipboard-backends)
+      (when (dired-clipboard--call-file-clipboard-backend name 'copy payload)
+        (throw 'backend name)))))
+
+(defun dired-clipboard--files-from-file-backends ()
+  "Return files from the first backend with existing paths."
+  (catch 'files
+    (dolist (name dired-clipboard-file-clipboard-backends)
+      (when-let ((files
+                  (dired-clipboard--existing-files
+                   (dired-clipboard--call-file-clipboard-backend
+                    name 'paste))))
+        (throw 'files files)))))
+
+(defun dired-clipboard--windows-backend-available-p (operation _payload)
+  "Return non-nil if the Windows backend can handle OPERATION."
+  (and (memq operation '(copy paste))
+       dired-clipboard-use-native-file-clipboard
+       (eq system-type 'windows-nt)
+       (dired-clipboard--powershell-program)))
+
 (defun dired-clipboard--set-windows-file-clipboard (files)
   "Set the Windows Explorer file clipboard to FILES."
   (when (and dired-clipboard-use-native-file-clipboard
@@ -475,6 +648,11 @@ When PREDICATE is non-nil, call the saved predicate instead."
      dired-clipboard--windows-set-file-drop-script
      (dired-clipboard--base64-lines files))))
 
+(defun dired-clipboard--copy-windows-file-clipboard (payload)
+  "Copy PAYLOAD to the Windows Explorer file clipboard."
+  (when-let ((files (plist-get payload :local-files)))
+    (dired-clipboard--set-windows-file-clipboard files)))
+
 (defun dired-clipboard--windows-files-from-clipboard ()
   "Return file names from the Windows Explorer file clipboard."
   (when (and dired-clipboard-use-native-file-clipboard
@@ -482,6 +660,13 @@ When PREDICATE is non-nil, call the saved predicate instead."
     (when-let ((output (dired-clipboard--call-powershell
                         dired-clipboard--windows-get-file-drop-script)))
       (dired-clipboard--decode-base64-lines output))))
+
+(defun dired-clipboard--macos-backend-available-p (operation _payload)
+  "Return non-nil if the macOS backend can handle OPERATION."
+  (and (memq operation '(copy paste))
+       dired-clipboard-use-native-file-clipboard
+       (eq system-type 'darwin)
+       (executable-find dired-clipboard-osascript-program)))
 
 (defun dired-clipboard--set-macos-file-clipboard (files)
   "Set the macOS Finder file clipboard to FILES."
@@ -493,6 +678,11 @@ When PREDICATE is non-nil, call the saved predicate instead."
            dired-clipboard--macos-set-file-urls-script
            files)))
 
+(defun dired-clipboard--copy-macos-file-clipboard (payload)
+  "Copy PAYLOAD to the macOS Finder file clipboard."
+  (when-let ((files (plist-get payload :local-files)))
+    (dired-clipboard--set-macos-file-clipboard files)))
+
 (defun dired-clipboard--macos-files-from-clipboard ()
   "Return file names from the macOS Finder file clipboard."
   (when (and dired-clipboard-use-native-file-clipboard
@@ -502,56 +692,31 @@ When PREDICATE is non-nil, call the saved predicate instead."
                         dired-clipboard--macos-get-file-urls-script)))
       (dired-clipboard--lines output))))
 
-(defun dired-clipboard--set-native-file-clipboard (files)
-  "Set the native OS file clipboard to FILES."
-  (pcase system-type
-    ('windows-nt (dired-clipboard--set-windows-file-clipboard files))
-    ('darwin (dired-clipboard--set-macos-file-clipboard files))))
-
-(defun dired-clipboard--native-files-from-clipboard ()
-  "Return files from the native OS file clipboard."
-  (pcase system-type
-    ('windows-nt (dired-clipboard--windows-files-from-clipboard))
-    ('darwin (dired-clipboard--macos-files-from-clipboard))))
-
 (defun dired-clipboard--files-from-clipboard ()
   "Return existing files/directories represented by the clipboard."
-  (let* ((native-files (dired-clipboard--native-files-from-clipboard))
+  (let* ((backend-files (dired-clipboard--files-from-file-backends))
          (gnome (dired-clipboard--selection 'x-special/gnome-copied-files))
+         (mate (dired-clipboard--selection 'x-special/mate-copied-files))
          (uri-list (dired-clipboard--selection 'text/uri-list))
          (text (or (dired-clipboard--selection 'UTF8_STRING)
                    (dired-clipboard--selection 'STRING)
-                   (dired-clipboard--current-kill)))
-         (files (or native-files
-                    (dired-clipboard--parse-gnome-files gnome)
-                    (dired-clipboard--parse-gnome-files text)
-                    (dired-clipboard--parse-uri-list uri-list)
-                    (dired-clipboard--parse-path-list text))))
-    (dired-clipboard--existing-files files)))
+                   (dired-clipboard--current-kill))))
+    (dired-clipboard--first-existing-files
+     backend-files
+     (dired-clipboard--parse-copied-files gnome)
+     (dired-clipboard--parse-copied-files mate)
+     (dired-clipboard--parse-copied-files text)
+     (dired-clipboard--parse-uri-list uri-list)
+     (dired-clipboard--parse-path-list text))))
 
 (defun dired-clipboard--copy-files (files)
   "Copy FILES to the kill ring and system clipboard."
-  (let* ((text (mapconcat #'identity files "\n"))
-         (local-files (dired-clipboard--local-files files))
-         (local-uris (dired-clipboard--uris-for-files local-files))
-         (uri-list (when local-uris
-                     (concat (mapconcat #'identity local-uris "\r\n") "\r\n")))
-         (gnome-list (when local-uris
-                       ;; Nautilus rejects empty lines in this MIME payload.
-                       (concat "copy\n" (mapconcat #'identity local-uris "\n"))))
-         (selection (copy-sequence text))
-         clipboard-owned)
-    (when local-uris
-      (dired-clipboard--install-selection-converters)
-      (add-text-properties
-       0 (length selection)
-       `(text/uri-list ,uri-list
-                       x-special/gnome-copied-files ,gnome-list)
-       selection))
-    (setq clipboard-owned
-          (and local-uris
-               (or (dired-clipboard--set-native-file-clipboard local-files)
-                   (dired-clipboard--set-wayland-file-clipboard gnome-list uri-list))))
+  (let* ((payload (dired-clipboard--file-clipboard-payload files))
+         (text (plist-get payload :text))
+         (selection (plist-get payload :selection))
+         (clipboard-owned
+          (and (plist-get payload :local-uris)
+               (dired-clipboard--copy-with-file-backends payload))))
     (if clipboard-owned
         (let ((interprogram-cut-function nil))
           (kill-new text))

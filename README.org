@@ -61,8 +61,18 @@ When the clipboard contains files copied from a supported desktop file manager,
 - Plain newline-separated file names for Dired-to-Dired copy and paste
 - ~text/uri-list~
 - ~x-special/gnome-copied-files~
+- ~x-special/mate-copied-files~
 - Windows Explorer FileDrop, through PowerShell/.NET
 - macOS Finder file URLs, through ~osascript~ and AppleScriptObjC
+
+OS/environment-specific file clipboard support is implemented as ordered
+backends.  Built-in backends are tried only when their capabilities are
+available:
+
+- ~windows~ for Explorer FileDrop on Windows
+- ~macos~ for Finder/NSPasteboard file URLs on macOS
+- ~wayland~ for ~wl-copy~ file MIME data on PGTK/Wayland, including
+  GNOME/Nautilus and MATE/Caja MIME targets where detected
 
 On PGTK/Wayland, Emacs may not advertise the file clipboard MIME types expected
 by desktop file managers.  When ~wl-copy~ is available,
@@ -77,6 +87,9 @@ by desktop file managers.  When ~wl-copy~ is available,
   target.
 - ~dired-clipboard-use-native-file-clipboard~ enables or disables native
   Windows and macOS file clipboard integration.
+- ~dired-clipboard-file-clipboard-backends~ controls the backend order.
+- ~dired-clipboard-file-clipboard-backend-alist~ can be extended with custom
+  environment-specific backends.
 - ~dired-clipboard-powershell-program~ selects the PowerShell executable.
 - ~dired-clipboard-osascript-program~ selects the ~osascript~ executable.
 
